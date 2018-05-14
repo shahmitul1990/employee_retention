@@ -1,0 +1,184 @@
+---
+title: "Employee Retention"
+author: "Mitul Shah"
+date: "8/12/2017"
+output: pdf_document
+---
+
+## Load the data 
+
+```{r}
+
+# read data set
+data = read.csv("employee_retention_data.csv") 
+
+# check the structure
+str(data) 
+
+data$company_id = as.factor(data$company_id) # this is a categorical var
+data$join_date = as.Date(data$join_date) #make it a date
+data$quit_date = as.Date(data$quit_date) #make it a date
+
+summary(data) 
+
+```
+
+## Create a table with 3 columns: day, company_id, employee headcount
+
+Let’s answer this question: You should create a table with 3 columns: day, employee headcount, company id.
+
+```{r}
+
+# libraries needed
+require(dplyr)
+require(rpart)
+require(ggplot2)
+require(scales)
+
+unique_dates = seq(as.Date("2011/01/24"), as.Date("2015/12/13"), by = "day")
+
+unique_companies = unique(data$company_id)
+
+data_headcount = merge(unique_dates, unique_companies, by = NULL)
+
+colnames(data_headcount) = c("date", "company_id")
+
+data_join = data %>%
+            group_by(join_date, company_id) %>%
+            summarise(join_count = length(join_date))
+
+## This is also correct:
+# data_join = data %>% group_by(join_date, company_id) %>% summarise(join_count = n_distinct(employee_id))
+
+## data_quit = data %>% group_by(quit_date, company_id) %>% summarise(quit_count = n_distinct(employee_id))
+
+
+data_quit = data %>%
+            group_by(quit_date, company_id) %>%
+            summarise(quit_count = length(quit_date))
+
+
+data_headcount = merge (data_headcount, data_join,
+                        by.x = c("date", "company_id"),
+                        by.y = c("join_date", "company_id"),
+                        all.x = TRUE)
+
+
+data_headcount = merge (data_headcount, data_quit,
+                        by.x = c("date", "company_id"),
+                        by.y = c("quit_date", "company_id"),
+                        all.x = TRUE)
+
+
+data_headcount$join_count[is.na(data_headcount$join_count)] = 0
+data_headcount$quit_count[is.na(data_headcount$quit_count)] = 0
+
+
+data_headcount = data_headcount %>%
+            group_by(company_id) %>%
+            mutate(join_cumsum = cumsum(join_count),
+                     quit_cumsum = cumsum(quit_count))
+
+data_headcount$count = data_headcount$join_cumsum - data_headcount$quit_cumsum
+
+data_headcount_table = data.frame(data_headcount[, c("date", "company_id","count")])
+
+```
+
+
+
+```{r}
+
+## Another way
+
+loop_cumsum = c() #intialize empty vector
+loop_date = c()
+loop_company = c()
+
+
+for (i in seq(as.Date("2011/01/24"), as.Date("2015/12/13"), by = "day")) { 
+   for (j in unique(data$company_id)){ # loop through all companies
+        tmp_join = nrow(subset(data, join_date <= i & company_id == j)) 
+        tmp_quit = nrow(subset(data, quit_date <= i & company_id == j)) 
+        loop_cumsum = c(loop_cumsum, tmp_join - tmp_quit )
+        loop_date = c(loop_date, i)
+        loop_company = c(loop_company, j)
+   }
+data_headcount_table_loop = data.frame(date = as.Date(loop_date, origin = '1970-01-01'), company_id = loop_company, count = loop_cumsum)
+}
+
+
+
+identical(data_headcount_table[order(data_headcount_table[,1],                as.numeric(as.character(data_headcount_table[,2]))),], data_headcount_table[order(data_headcount_table[,1],              as.numeric(as.character(data_headcount_table[,2]))),])
+
+```
+
+## Main factors driving Employee Retention
+
+Now, let's try to understand employee retention. Here, the main challenge is about feature engineering. That is, extract variables from the quitting date column. 
+
+
+```{r}
+
+data$employment_length = as.numeric(data$quit_date - data$join_date)
+
+data$week_of_year = as.numeric(format(data$quit_date, "%U"))
+
+hist(data$employment_length, breaks = 100)
+
+hist(data$week_of_year, breaks = length(unique(data$week_of_year)))
+```
+
+Very interesting, there are peaks around each employee year anniversary! And it also peaks around the new year. Makes sense, companies have much more budget to hire at the beginning of the year. 
+
+Now, let's see if we can find the characteristics of people who quit early. Looking at the class employement_length, it looks like we could define early quitters as those people who quit within 1 year or so. So, let's create two classes of users: quit within 13 months or not (if they haven't been in the company for atleast 13 months, we remove them)
+
+```{r}
+
+## Only keep people who had enough time to age                                    
+data = subset(data, data$join_date < as.Date("2015/12/13") - (365 + 31))
+
+## Early Quitters column
+data$early_quitter = as.factor(ifelse(is.na(data$quit_date) | as.numeric(data$quit_date - data$join_date) > 396, 0, 1))
+
+```
+
+
+```{r}
+
+tree = rpart(early_quitter ~ .,data[, c("company_id", "dept", "seniority", "early_quitter", "salary")], control = rpart.control(minbucket = 30, maxdepth = 3 , cp = 0.000001), parms = list(prior = c(0.5,0.5)))
+
+tree
+
+
+```
+
+Not very surprising! Salary matters the most. After all, it probably has the information about other variables too within itself like seniority, dept, etc. 
+
+It is interesting though that people with salary betweem 62500 and 224500 have higher probability of being an early quitter. That means the people with very high salary and people who make very little are not likely to quit early. 
+
+By plotting the proportion of early quitter by salary percentile, this becomes quite clear. 
+
+```{r}
+
+data$salary_percentile = cut(data$salary, breaks = quantile(data$salary, probs = seq(0, 1, 0.02)), include.lowest = TRUE, labels = 1:50)
+
+data_proportion_by_percentile = data %>%
+                                 group_by(salary_percentile) %>%
+                                 summarize(proportion_early_quitters = length(early_quitter[early_quitter==1])/length(early_quitter)
+                                           )
+
+qplot(salary_percentile, proportion_early_quitters, data=data_proportion_by_percentile, geom="line", group =1) + scale_x_discrete(breaks = seq(1,50, by=2))
+
+```
+
+## Conclusion
+
+1. Given how important is salary, I would definitely love to have as a variable the salary the employee was offered in the nect job. Otherwise, things like promotions or raises received during the employee tenure would be interesting. 
+
+2. The major findings are that the employees quit at year anniversaries or at the beginning of the year. Both cases make sense. Even if you don't like your current job, you often stay for 1 year before quitting plus you often get stocks after 1 year so it makes sense to wait. Also, the beginning of the year is well-known to be the best time to change job: companies are hiring more and you often want to stay until the end of Dec to get the calender year bonus. 
+
+3. Employees with low and high salaries are less likely to quit. Probably because employees with high salaries are happy there and employees with low salaries are not that marketable, so they have a hard time finding a new job. 
+
+
+
